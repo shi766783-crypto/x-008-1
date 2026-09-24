@@ -76,17 +76,78 @@
         </div>
       </div>
     </section>
+
+    <section>
+      <h3 class="block-title">数据备份</h3>
+      <div class="card export-card">
+        <div class="export-info">
+          <b>导出账本数据</b>
+          <p>数据仅保存在本浏览器，换设备或清理缓存前请先导出备份。导出为 JSON 文件，过程不会修改现有数据。</p>
+        </div>
+        <button class="btn btn-primary" @click="openExport">导出数据</button>
+      </div>
+    </section>
+
+    <Modal title="导出账本数据" v-if="exportOpen" @close="exportOpen = false">
+      <div v-if="ledgerEmpty" class="export-empty">
+        当前账本还没有任何数据，暂无可导出内容。请先创建账户或记一笔账，之后再导出备份。
+      </div>
+      <template v-else>
+        <div class="field">
+          <span>导出范围</span>
+          <div class="seg">
+            <button type="button" class="seg-btn" :class="{ active: exportMode === 'all' }" @click="exportMode = 'all'">全部数据</button>
+            <button type="button" class="seg-btn" :class="{ active: exportMode === 'range' }" @click="exportMode = 'range'">按月份范围</button>
+          </div>
+        </div>
+        <div v-if="exportMode === 'range'" class="range-row">
+          <label class="field">
+            <span>开始月份</span>
+            <input type="month" v-model="startMonth" />
+          </label>
+          <label class="field">
+            <span>结束月份</span>
+            <input type="month" v-model="endMonth" />
+          </label>
+        </div>
+        <p class="muted range-hint" v-if="exportMode === 'range'">流水与预算按所选月份过滤；账户、储蓄目标与成就为当前状态，会完整包含。</p>
+        <p class="range-error" v-if="rangeInvalid">开始月份不能晚于结束月份。</p>
+
+        <div class="export-summary" v-if="previewSummary">
+          <div class="summary-title">导出内容核对（与文件中的 summary 一致）</div>
+          <div class="summary-grid">
+            <div><span>账户</span><b>{{ previewSummary.accounts }}</b></div>
+            <div><span>流水</span><b>{{ previewSummary.transactions }}</b></div>
+            <div><span>预算</span><b>{{ previewSummary.budgets }}</b></div>
+            <div><span>目标</span><b>{{ previewSummary.goals }}</b></div>
+            <div><span>成就</span><b>{{ previewSummary.achievements }}</b></div>
+          </div>
+          <div class="summary-amounts">
+            <span>收入合计 <b class="income-text">¥{{ money(previewSummary.incomeTotal) }}</b></span>
+            <span>支出合计 <b class="neg">¥{{ money(previewSummary.expenseTotal) }}</b></span>
+            <span>转账合计 <b>¥{{ money(previewSummary.transferTotal) }}</b></span>
+          </div>
+        </div>
+        <p class="export-done" v-if="exportedFile">✅ 已导出「{{ exportedFile }}」，可打开文件核对 summary 中的条数与金额。</p>
+      </template>
+
+      <template #footer>
+        <button type="button" class="btn" @click="exportOpen = false">关闭</button>
+        <button v-if="!ledgerEmpty" type="button" class="btn btn-primary" :disabled="rangeInvalid" @click="doExport">导出下载</button>
+      </template>
+    </Modal>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useStore, controllersApi } from '../data/store.js'
 import { money } from '../core/utils.js'
 import { BUDGET_WARN_RATIO, TRANSACTION_TYPES } from '../core/constants.js'
+import Modal from '../components/Modal.vue'
 
 const store = useStore()
-const { achievement } = controllersApi
+const { achievement, exporter } = controllersApi
 
 const allBadges = computed(() => achievement.ACHIEVEMENTS)
 const totalBadges = computed(() => allBadges.value.length)
@@ -122,6 +183,37 @@ const goalRows = computed(() =>
     percent: g.targetAmount > 0 ? Math.round((g.savedAmount / g.targetAmount) * 100) : 0
   }))
 )
+
+const exportOpen = ref(false)
+const exportMode = ref('all')
+const startMonth = ref('')
+const endMonth = ref('')
+const exportedFile = ref('')
+
+const ledgerEmpty = computed(
+  () =>
+    store.accounts.length + store.transactions.length + store.budgets.length + store.goals.length + store.achievements.length === 0
+)
+const activeRange = computed(() =>
+  exportMode.value === 'range' ? { startMonth: startMonth.value, endMonth: endMonth.value } : {}
+)
+const rangeInvalid = computed(
+  () => exportMode.value === 'range' && startMonth.value && endMonth.value && startMonth.value > endMonth.value
+)
+const previewSummary = computed(() => {
+  if (ledgerEmpty.value || rangeInvalid.value) return null
+  return exporter.buildExportPayload(activeRange.value)?.summary || null
+})
+
+const openExport = () => {
+  exportedFile.value = ''
+  exportOpen.value = true
+}
+
+const doExport = () => {
+  const result = exporter.runExport(activeRange.value)
+  if (result) exportedFile.value = result.filename
+}
 </script>
 
 <style scoped>
@@ -260,5 +352,90 @@ const goalRows = computed(() =>
 .mini-badge.locked {
   filter: grayscale(1);
   opacity: 0.5;
+}
+.export-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.export-info {
+  flex: 1;
+  min-width: 0;
+}
+.export-info p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.export-empty {
+  padding: 18px 14px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+.range-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.range-hint {
+  font-size: 12px;
+  margin: -4px 0 12px;
+}
+.range-error {
+  font-size: 12px;
+  color: var(--expense);
+  margin: -4px 0 12px;
+}
+.export-summary {
+  background: var(--bg-elevated);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.summary-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  text-align: center;
+}
+.summary-grid span {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.summary-grid b {
+  font-size: 16px;
+}
+.summary-amounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-color);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.summary-amounts b {
+  color: var(--text-primary);
+}
+.summary-amounts .income-text {
+  color: var(--income);
+}
+.summary-amounts .neg {
+  color: var(--expense);
+}
+.export-done {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--income);
 }
 </style>
