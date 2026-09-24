@@ -76,17 +76,80 @@
         </div>
       </div>
     </section>
+
+    <section>
+      <h3 class="block-title">数据备份</h3>
+      <div class="card export-card">
+        <div class="export-info">
+          <b>导出账本数据</b>
+          <p class="muted">数据仅保存在本浏览器，换设备或清理缓存会全部丢失。可将账户、流水、预算、目标和成就打包成 JSON 文件下载，导出过程不改动任何现有数据。</p>
+          <p v-if="lastExport" class="export-done">
+            ✅ 已导出 {{ lastExport.filename }}（流水 {{ lastExport.summary.transactions }} 笔，收入 ¥{{ money(lastExport.summary.totalIncome) }}，支出 ¥{{ money(lastExport.summary.totalExpense) }}）
+          </p>
+        </div>
+        <button class="btn btn-primary" @click="openExport">导出数据</button>
+      </div>
+    </section>
+
+    <Modal title="导出数据备份" @close="exportOpen = false" v-if="exportOpen">
+      <div class="seg">
+        <button type="button" class="seg-btn" :class="{ active: exportScope === 'all' }" @click="exportScope = 'all'">全部数据</button>
+        <button type="button" class="seg-btn" :class="{ active: exportScope === 'range' }" @click="exportScope = 'range'">按月份范围</button>
+      </div>
+
+      <template v-if="exportScope === 'range'">
+        <div class="range-fields">
+          <label class="field">
+            <span>开始月份</span>
+            <input type="month" v-model="fromMonth" />
+          </label>
+          <label class="field">
+            <span>结束月份</span>
+            <input type="month" v-model="toMonth" />
+          </label>
+        </div>
+        <p class="muted range-hint">账户、储蓄目标与成就始终完整导出，月份范围仅筛选流水与预算。</p>
+      </template>
+
+      <p v-if="rangeInvalid" class="export-warn">开始月份不能晚于结束月份，请重新选择。</p>
+
+      <template v-else-if="exportPreview">
+        <p v-if="previewEmpty" class="export-empty">当前范围没有任何可导出的数据（账本为空），请先添加账户或记下第一笔收支。</p>
+        <div v-else class="export-preview">
+          <div class="preview-row">
+            <span>账户 <b>{{ exportPreview.summary.accounts }}</b> 个</span>
+            <span>流水 <b>{{ exportPreview.summary.transactions }}</b> 笔</span>
+            <span>预算 <b>{{ exportPreview.summary.budgets }}</b> 条</span>
+            <span>目标 <b>{{ exportPreview.summary.goals }}</b> 个</span>
+            <span>成就 <b>{{ exportPreview.summary.achievements }}</b> 枚</span>
+          </div>
+          <div class="preview-row">
+            <span>收入合计 <b class="income">+¥{{ money(exportPreview.summary.totalIncome) }}</b></span>
+            <span>支出合计 <b class="expense">-¥{{ money(exportPreview.summary.totalExpense) }}</b></span>
+            <span>转账合计 <b>¥{{ money(exportPreview.summary.totalTransfer) }}</b></span>
+            <span>净结余 <b>¥{{ money(exportPreview.summary.net) }}</b></span>
+          </div>
+          <p class="muted preview-note">以上条数与金额会一并写入导出文件的 summary 中，下载后可直接打开文件核对。</p>
+        </div>
+      </template>
+
+      <template #footer>
+        <button type="button" class="btn" @click="exportOpen = false">取消</button>
+        <button type="button" class="btn btn-primary" :disabled="exportDisabled" @click="doExport">导出备份文件</button>
+      </template>
+    </Modal>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useStore, controllersApi } from '../data/store.js'
-import { money } from '../core/utils.js'
+import { money, todayStr } from '../core/utils.js'
 import { BUDGET_WARN_RATIO, TRANSACTION_TYPES } from '../core/constants.js'
+import Modal from '../components/Modal.vue'
 
 const store = useStore()
-const { achievement } = controllersApi
+const { achievement, exporter } = controllersApi
 
 const allBadges = computed(() => achievement.ACHIEVEMENTS)
 const totalBadges = computed(() => allBadges.value.length)
@@ -122,6 +185,46 @@ const goalRows = computed(() =>
     percent: g.targetAmount > 0 ? Math.round((g.savedAmount / g.targetAmount) * 100) : 0
   }))
 )
+
+const exportOpen = ref(false)
+const exportScope = ref('all')
+const fromMonth = ref('')
+const toMonth = ref('')
+const lastExport = ref(null)
+
+const thisMonth = todayStr().slice(0, 7)
+
+const openExport = () => {
+  exportScope.value = 'all'
+  const months = store.transactions.map((t) => t.date.slice(0, 7)).sort()
+  fromMonth.value = months[0] || thisMonth
+  toMonth.value = thisMonth
+  exportOpen.value = true
+}
+
+const exportPreview = computed(() => {
+  // 访问响应式 store，保证其他页面改动数据后重新打开弹窗时预览会刷新
+  void (store.accounts, store.transactions, store.budgets, store.goals, store.achievements)
+  if (exportScope.value === 'range') {
+    if (!fromMonth.value || !toMonth.value || fromMonth.value > toMonth.value) return null
+    return exporter.buildExportPayload({ fromMonth: fromMonth.value, toMonth: toMonth.value })
+  }
+  return exporter.buildExportPayload()
+})
+
+const rangeInvalid = computed(
+  () => exportScope.value === 'range' && fromMonth.value && toMonth.value && fromMonth.value > toMonth.value
+)
+const previewEmpty = computed(() => (exportPreview.value ? exporter.isPayloadEmpty(exportPreview.value) : false))
+const exportDisabled = computed(() => !exportPreview.value || previewEmpty.value)
+
+const doExport = () => {
+  const options = exportScope.value === 'range' ? { fromMonth: fromMonth.value, toMonth: toMonth.value } : {}
+  const result = exporter.exportLedger(options)
+  if (!result.ok) return
+  lastExport.value = { filename: result.filename, summary: result.payload.summary }
+  exportOpen.value = false
+}
 </script>
 
 <style scoped>
@@ -260,5 +363,80 @@ const goalRows = computed(() =>
 .mini-badge.locked {
   filter: grayscale(1);
   opacity: 0.5;
+}
+.export-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.export-info {
+  flex: 1;
+  min-width: 220px;
+}
+.export-info p {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+.export-done {
+  color: var(--income);
+  font-weight: 600;
+  word-break: break-all;
+}
+.range-fields {
+  display: flex;
+  gap: 12px;
+}
+.range-fields .field {
+  flex: 1;
+}
+.range-hint {
+  font-size: 12px;
+  margin: -4px 0 12px;
+}
+.export-warn {
+  color: var(--expense);
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+.export-empty {
+  background: rgba(240, 201, 87, 0.15);
+  border: 1px solid rgba(224, 164, 31, 0.4);
+  color: #b8860b;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+.export-preview {
+  background: var(--bg-elevated);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 4px 0 8px;
+}
+.preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 3px 0;
+}
+.preview-row b {
+  color: var(--text-primary);
+}
+.preview-row b.income {
+  color: var(--income);
+}
+.preview-row b.expense {
+  color: var(--expense);
+}
+.preview-note {
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
